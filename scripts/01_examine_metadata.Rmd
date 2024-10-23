@@ -1,0 +1,634 @@
+---
+title: "Examine metadata"
+author: "Kimberly Olney, Ph.D"
+date: "10/21/2024"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+This script will examine the variables in the metadata to determine if there are differences by disease type and/or sex differences for clinical data such as brain weight. 
+# Setup
+```{r setup, message=FALSE, warning=FALSE, tidy=TRUE}
+knitr::opts_knit$set(root.dir = ".")
+```
+
+# User defined variables
+sourcing file_paths_and_colours will load the libraries and user defined variables for colors of the graphs 
+```{r set_variables, message=FALSE, warning=FALSE, tidy=TRUE}
+source(here::here("scripts", "file_paths_and_colours.R"))
+```
+
+# Total percent male
+```{r percent_male}
+total_sex_percent <- metadata %>% 
+  group_by(Sex) %>%
+  dplyr::count() %>% 
+  ungroup(Sex) %>% 
+  mutate(perc = `n` / sum(`n`)) %>% 
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+```
+
+# APOE E4 allele count
+```{r APOE_E4_allele_count, message=FALSE, warning=FALSE, tidy=TRUE}
+metadata$APOE_E4_allele_count <-
+  ifelse(
+    metadata$APOE == "E2E3",
+    0,
+    ifelse(
+      metadata$APOE == "E2E4",
+      1,
+      ifelse(
+        metadata$APOE == "E3E3",
+        0,
+        ifelse(
+          metadata$APOE == "E3E4",
+          1,
+          ifelse(
+            metadata$APOE == "E4E4", 2, "NA")))))
+metadata$APOE_E4_allele_count <- as.numeric(metadata$APOE_E4_allele_count)
+metadata$sex_numeric <- ifelse(metadata$Sex == "male", 0, 1)
+metadata$Race_numeric <- ifelse(metadata$Race == "Caucasian", 0, 1)
+```
+
+# Output updated metadata table
+```{r metadata_output, message=FALSE, warning=FALSE, tidy=TRUE}
+write.table(
+  metadata,
+  paste0(pathToRawData, "ATS_proteomics_metadata.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+# clean up
+remove(APOE, metadata_ATS, df, RNA_metrics_metadata)
+```
+
+## Proteomics sample count
+```{r bar_plot, message=FALSE, warning=FALSE, tidy=TRUE}
+# create bar plot showing number of samples for each group
+bar <- ggplot(metadata, aes(TYPE, after_stat(count), fill = TYPE)) +
+  geom_bar() +
+  theme_bw() +
+  xlab("Disease group") +
+  ggtitle("Proteomics sample count by disease group") +
+  geom_text(
+    stat = 'count',
+    aes(label = after_stat(count)),
+    vjust = 1.6,
+    color = "white",
+    size = 3.5
+  ) +
+    theme_bw() + 
+  scale_fill_manual(values = TypeColors)
+bar
+
+# pie chart
+data <- metadata %>%
+  group_by(TYPE) %>%
+  dplyr::count() %>%
+  ungroup() %>%
+  mutate(perc = `n` / sum(`n`)) %>%
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+
+pie <- ggplot(data, aes(x = "", y = perc, fill = TYPE)) +
+  geom_col(color = "black") +
+  geom_label(
+    aes(label = labels),
+    color = c("white"),
+    position = position_stack(vjust = 0.5),
+    show.legend = FALSE
+  ) +
+  guides(fill = guide_legend(title = "Disease group")) +
+  scale_fill_manual(values = TypeColors) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  theme(legend.position = "none")
+pie
+```
+save plot
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+ggarrange(bar,
+          pie,
+          ncol = 2,
+          widths = c(2.5, 1))
+
+path <- paste0("../results/metadata/TYPE.count")
+saveToPDF(paste0(path, ".pdf"), width = 7.25, height = 3.5)
+
+# clean up
+remove(bar, pie, data)
+```
+
+## Split by sex 
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+bar_sex <- ggplot(metadata, aes(x = TYPE, fill = Sex)) + 
+  geom_bar(aes(y = after_stat(count)), position = "dodge") + 
+  theme_bw() +
+  xlab("Disease group") + 
+  ggtitle("Proteomics sample count by inferred sex") +
+  geom_text(stat='count', aes(x = TYPE, label=after_stat(count)), 
+            position = position_dodge(width = 1), 
+              vjust=-.25, 
+            color="black", size=3.5) + 
+  scale_fill_manual(values = SexColors) +
+  guides(fill = guide_legend(title = "Sex"))+
+  scale_y_continuous(breaks = seq(0, 350, by = 100), limits = c(0, 350))
+bar_sex
+
+data <- metadata %>% 
+  group_by(Sex,TYPE) %>%
+  dplyr::count() %>% 
+  ungroup(Sex) %>% 
+  mutate(perc = `n` / sum(`n`)) %>% 
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+```
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+bar_sex
+path <- paste0("../results/metadata/TYPE.sex.count")
+saveToPDF(paste0(path, ".pdf"), width = 6.88, height = 4.33)
+
+# clean up
+remove(bar_sex, data)
+```
+
+# A-T-S sample count
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+# create bar plot showing number of samples for each A-T-S group
+bar <- ggplot(metadata, aes(group.redefined, after_stat(count), fill = group.redefined)) +
+  geom_bar() +
+  theme_bw() +
+  xlab("Disease group") +
+  ggtitle("Proteomics sample count by A-T-S scores") +
+  theme_bw() + 
+  geom_text(
+    stat = 'count',
+    aes(label = after_stat(count)),
+    vjust = 1.6,
+    color = "black",
+    size = 3.5
+  ) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 10, angle = 75, vjust = 1, hjust=1),
+        axis.title.y = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 10),
+        legend.text=element_text(size=10),
+        legend.title=element_text(size=10)) +
+  scale_fill_manual(values = ATSColors)
+bar
+path <- paste0("../results/metadata/ATS.count")
+saveToPDF(paste0(path, ".pdf"), width = 7, height = 5)
+```
+
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+# pie chart
+data <- metadata %>%
+  group_by(group.redefined) %>%
+  dplyr::count() %>%
+  ungroup() %>%
+  mutate(perc = `n` / sum(`n`)) %>%
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+
+pie <- ggplot(data, aes(x = "", y = perc, fill = group.redefined)) +
+  geom_col(color = "black") +
+  geom_label(
+    aes(label = labels),
+    color = c("black"),
+    position = position_stack(vjust = 0.5),
+    show.legend = FALSE
+  ) +
+  guides(fill = guide_legend(title = "Disease group")) +
+  scale_fill_manual(values = ATSColors) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  theme(legend.position = "none")
+pie
+```
+
+save plot
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+ggarrange(bar,
+          pie,
+          ncol = 2,
+          widths = c(2.5, 1))
+
+path <- paste0("../results/metadata/ATS.count.pie")
+saveToPDF(paste0(path, ".pdf"), width = 9, height = 6)
+
+# clean up
+remove(bar, data, pie) # do not remove df, used for split by sex 
+```
+
+## A-T-S split by sex 
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+bar_sex <- ggplot(metadata, aes(x = group.redefined, fill = Sex)) + 
+  geom_bar(aes(y = after_stat(count)), position = "dodge") + 
+  theme_bw() + 
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 10, angle = 90, vjust = 0.5, hjust=1),
+        axis.title.y = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 10),
+        legend.text=element_text(size=10),
+        legend.title=element_text(size=10)) +
+  xlab("Disease group") + 
+  ggtitle("Proteomics sample count by inferred sex") +
+  geom_text(stat='count', aes(x = group.redefined, label=after_stat(count)), 
+            position = position_dodge(width = 1), 
+              vjust=-.25, 
+            color="black", size=3.5) + 
+  scale_fill_manual(values = SexColors) +
+  guides(fill = guide_legend(title = "Sex inferred"))+
+  scale_y_continuous(breaks = seq(0, 125, by = 25), limits = c(0, 125))
+bar_sex
+```
+
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+bar_sex
+path <- paste0("../results/metadata/ATS.sex.count")
+saveToPDF(paste0(path, ".pdf"), width = 9, height = 7)
+
+remove(bar_sex, pie_sex, data, df)
+```
+# Save metadata
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+saveRDS(metadata, paste0("../rObjects/ATS_metadata.rds"))
+```
+
+# Categorial variables
+### TYPE
+```{r message=FALSE, warning=FALSE, tidy=TRUE, eval=FALSE}
+metadata_categorical <-
+  data.frame(
+    metadata$LBD.type,
+    metadata$AD.subtype,
+    metadata$CDLB,
+    metadata$TDP.type,
+    metadata$APOE,
+    metadata$MAPT,
+    metadata$GRN,
+    metadata$TMEM106b,
+    metadata$Braak.NFT,
+    metadata$Thal.amyloid,
+    metadata$MF.Tau,
+    metadata$MF.Amyloid,
+    metadata$VaD,
+    metadata$TDP.43,
+    metadata$FHx,
+    metadata$MF.SP,
+    metadata$MF.NFT,
+    metadata$MF.LB,
+    metadata$Cing.LB,
+    metadata$Cing.Synuclein,
+    metadata$Race
+  )
+# To do it for all names
+column_variables <-
+  c(
+    "LBD.type",
+    "AD.subtype",
+    "CDLB",
+    "TDP.type",
+    "APOE",
+    "MAPT",
+    "GRN",
+    "TMEM106b",
+    "Braak.NFT",
+    "Thal.amyloid",
+    "MF.Tau",
+    "MF.Amyloid",
+    "VaD",
+    "TDP.43",
+    "FHx",
+    "MF.SP",
+    "MF.NFT",
+    "MF.LB",
+    "Cing.LB",
+    "Cing.Synuclein",
+    "Race"
+  )
+
+bar_plot_fun <- function(i, j) {
+  ggplot(metadata, aes(TYPE, after_stat(count), fill = factor(i))) +
+    geom_bar(colour = "black") +
+    theme_bw() +
+    ggtitle(j) + 
+    guides(fill = guide_legend(title = j)) +
+    xlab("Disease group") +
+    ylab("Count") +
+    scale_fill_manual(values=colorbindColors) +
+    geom_text(
+      stat = 'count',
+      aes(label = after_stat(count)),
+      position = position_stack(vjust = .5),
+      color = "black",
+      size = 3.5
+    )
+
+}
+bar_plots <-
+  Map(bar_plot_fun, i = metadata_categorical, j = column_variables)
+bar_plots
+
+
+p <- list()
+for (i in 1:length(column_variables)) {
+  p[[i]] <- grid.arrange(grobs = c(bar_plots[i]))
+}
+
+plotnames = imap(bar_plots, ~ paste0("../results/metadata/TYPE.", .y, ".pdf")) %>%
+  flatten()
+plotnames <- gsub("metadata.", "", plotnames)
+walk2(plotnames,
+      p,
+      ~ ggsave(
+        filename = .x,
+        plot = .y,
+        height = 5,
+        width = 6.5
+      ))
+```
+
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+# clean up
+remove(bar_plots, pie_plots, plotnames, p) # do not remove metadata_categorical
+```
+
+
+### A-T-S
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+bar_plot_fun <- function(i, j) {
+  ggplot(metadata, aes(group.redefined, after_stat(count), fill = factor(i))) +
+    geom_bar(colour = "black") +
+    theme_bw() +
+    ggtitle(j) + 
+    guides(fill = guide_legend(title = j)) +
+    xlab("Disease group") +
+    ylab("Count") +
+    scale_fill_manual(values=colorbindColors) +
+    geom_text(
+      stat = 'count',
+      aes(label = after_stat(count)),
+      position = position_stack(vjust = .5),
+      color = "black",
+      size = 3.5
+    ) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+}
+bar_plots <-
+  Map(bar_plot_fun, i = metadata_categorical, j = column_variables)
+bar_plots
+
+p <- list()
+for (i in 1:length(column_variables)) {
+  p[[i]] <- grid.arrange(grobs = c(bar_plots[i]), heights = c(2,1))
+}
+
+plotnames = imap(bar_plots, ~ paste0("../results/metadata/ATS.", .y, ".pdf")) %>%
+  flatten()
+plotnames <- gsub("metadata.", "", plotnames)
+walk2(plotnames,
+      p,
+      ~ ggsave(
+        filename = .x,
+        plot = .y,
+        height = 8.5,
+        width = 9.5
+      ))
+```
+
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+# clean up
+remove(bar_plots, plotnames, p) # do not remove metadata_categorical
+```
+
+# Continuous variables 
+### TYPE
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+metadata_continuous <-
+  data.frame(
+    metadata$Brain.wt,
+    metadata$Duration,
+    metadata$Age,
+    metadata$PMI
+  )
+column_variables <-
+  c(
+    "Brain.wt",
+    "Duration",
+    "Age",
+    "PMI"
+  )
+TYPE_comparison <-
+  list(
+    c("CONTROL", "LBD")
+  )
+
+violin_plot_fun <- function(i, j) {
+  ggplot(metadata, aes(TYPE, i, fill = TYPE)) +
+    geom_violin() +
+    geom_boxplot(width = 0.1, outlier.shape = NA) + 
+    geom_jitter(shape=16, position=position_jitter(0.2)) +
+    theme_bw() + 
+    ggtitle(j) +
+    xlab("Disease group") +
+    ylab(j) +
+    stat_compare_means(comparisons = TYPE_comparison) +
+    scale_fill_manual(values=TypeColors) +
+    theme(legend.position = "none")
+}
+violin_plots <-
+  Map(violin_plot_fun, i = metadata_continuous, j = column_variables)
+violin_plots
+
+plotnames = imap(violin_plots, ~paste0("../results/metadata/TYPE.", .y, ".pdf")) %>%
+  flatten()
+plotnames <- gsub("metadata.", "", plotnames)
+walk2(plotnames, violin_plots, ~ggsave(filename = .x, plot = .y, 
+                                    height = 4, width = 5.5))
+
+remove(violin_plots) 
+```
+
+## TYPE.sex
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+violin_plot_fun <- function(i, j) {
+  ggplot(metadata, aes(TYPE, i, fill = TYPE)) +
+    geom_violin() +
+    geom_boxplot(width = 0.1, outlier.shape = NA) + 
+    geom_jitter(shape=16, position=position_jitter(0.2)) +
+    theme_bw() + 
+    ggtitle(j) +
+    xlab("Disease group") +
+    ylab(j) +
+    stat_compare_means(comparisons = TYPE_comparison) +
+    scale_fill_manual(values=TypeColors) +
+    theme(legend.position = "none") +
+    facet_grid(. ~ Sex)
+}
+violin_plots <-
+  Map(violin_plot_fun, i = metadata_continuous, j = column_variables)
+violin_plots
+
+plotnames = imap(violin_plots, ~paste0("../results/metadata/TYPE.Sex.", .y, ".pdf")) %>%
+  flatten()
+plotnames <- gsub("metadata.", "", plotnames)
+walk2(plotnames, violin_plots, ~ggsave(filename = .x, plot = .y, 
+                                    height = 4, width = 7.5))
+remove(violin_plots) 
+```
+
+
+### A-T-S
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+metadata$group.redefined
+ATS_comparison <-
+  list(
+    c("CONTROL", "LBD_ATS"),
+    c("CONTROL", "LBD_AS"),
+    c("CONTROL", "LBD_TS"),
+    c("CONTROL", "LBD_S")
+
+  )
+violin_plot_fun <- function(i, j) {
+  ggplot(metadata, aes(group.redefined, i, fill = group.redefined)) +
+    geom_violin() +
+    geom_boxplot(width = 0.1, outlier.shape = NA) + 
+    geom_jitter(shape=16, position=position_jitter(0.2)) +
+    theme_bw() + 
+    ggtitle(j) +
+    xlab("Disease group") +
+    ylab(j) +
+    stat_compare_means(comparisons = ATS_comparison) +
+    scale_fill_manual(values=ATSColors) +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+}
+violin_plots <-
+  Map(violin_plot_fun, i = metadata_continuous, j = column_variables)
+violin_plots
+
+plotnames = imap(violin_plots, ~paste0("../results/metadata/ATS.", .y, ".pdf")) %>%
+  flatten()
+plotnames <- gsub("metadata.", "", plotnames)
+walk2(plotnames, violin_plots, ~ggsave(filename = .x, plot = .y, 
+                                    height = 7, width = 7))
+remove(violin_plots) 
+```
+
+
+### APOE
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+metadata$APOE <- as.factor(metadata$APOE)
+metadata_continuous <-
+  data.frame(
+    metadata$Brain.wt,
+    metadata$Duration,
+    metadata$Age,
+    metadata$Cing.LB,
+    metadata$MF.LB,
+    metadata$Braak.NFT,
+    metadata$Thal.amyloid,
+    metadata$MF.SP,
+    metadata$MF.NFT,
+    metadata$MF.Amyloid,
+    metadata$Cing.Synuclein
+  )
+column_variables <-
+  c(
+    "Brain.wt",
+    "Duration",
+    "Age",
+    "Cing.LB",
+    "MF.LB",
+    "Braak.NFT",
+    "Thal.amyloid",
+    "MF.SP",
+    "MF.NFT",
+    "MF.Amyloid",
+    "Cing.Synuclein"
+  )
+APOE_comparison <-
+  list(
+    c("E2E3", "E2E4"),
+    c("E2E3", "E3E3"),
+    c("E2E3", "E3E4"),
+    c("E2E3", "E4E4"),
+    c("E2E4", "E3E3"),
+    c("E2E4", "E3E4"),
+    c("E2E4", "E4E4"),
+    c("E3E3", "E3E4"),
+    c("E3E3", "E4E4"),
+    c("E3E4", "E4E4")
+  )
+
+violin_plot_fun <- function(i, j) {
+  ggplot(metadata, aes(APOE, i, fill = APOE)) +
+    geom_violin() +
+    geom_boxplot(width = 0.1, outlier.shape = NA) + 
+    geom_jitter(shape=16, position=position_jitter(0.2)) +
+    theme_bw() + 
+    ggtitle(j) +
+    xlab("APOE") +
+    ylab(j) +
+    stat_compare_means(comparisons = APOE_comparison) +
+    scale_fill_manual(values=colorbindColors) +
+    theme(legend.position = "none")
+}
+violin_plots <-
+  Map(violin_plot_fun, i = metadata_continuous, j = column_variables)
+violin_plots
+
+plotnames = imap(violin_plots, ~paste0("../results/metadata/TYPE.APOE.", .y, ".pdf")) %>%
+  flatten()
+plotnames <- gsub("metadata.", "", plotnames)
+walk2(plotnames, violin_plots, ~ggsave(filename = .x, plot = .y, 
+                                    height = 4, width = 5.5))
+remove(violin_plots) 
+```
+
+# Correlation heatmap
+scale() function is used to ensure that variables measured in different scales (e.g. age of death vs RIN) are comparable.
+same results with and without the use of scale
+```{r correlation, message=FALSE, warning=FALSE, tidy=TRUE}
+# scale continuous data 
+metadata <-
+  metadata[, c(
+    "Brain.wt",
+    "Age",
+    "Braak.NFT",
+    "Thal.amyloid",
+    "Cing.LB"
+  )] %>% scale()
+info <- as.data.frame(metadata)
+# correlation
+cor_mat <- rcorr(as.matrix(info))
+corrplot(
+  cor_mat$r,
+  method = "color",
+  col = correlationColors(200),
+  type = "upper",
+  order = "hclust",
+  p.mat = cor_mat$P,
+  addCoef.col = "black",
+  # Add coefficient of correlation
+  tl.col = "black",
+  tl.srt = 45,
+  #Text label color and rotation
+  diag = FALSE,
+  col.lim = c(-1, 1)
+)
+path <- paste0("../results/metadata/correlation_continuous_variables_pathology_scores")
+saveToPDF(paste0(path, ".pdf"), width = 5, height = 5)
+```
+
+

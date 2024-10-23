@@ -1,0 +1,697 @@
+---
+title: "Proteomics Differential Analysis"
+author: "Kimberly Olney, Ph.D."
+date: "10/24/2024"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+params:
+  args: myarg
+---
+
+LBD CWOW Proteomics data for LBD and control cases. Obtained from Synapse.org syn24995077.txt
+
+# Setup
+```{r setup}
+knitr::opts_knit$set(root.dir = ".")
+```
+
+# User defined variables
+sourcing file_paths_and_colours will load the libraries and user defined variables for colors of the graphs 
+```{r set_variables, message=FALSE, warning=FALSE, tidy=TRUE}
+source(here::here("scripts", "file_paths_and_colours.R"))
+```
+
+# Read in proteomics data and protein to gene association
+```{r inputs}
+batch_to_NPID <- read.delim(paste0(input_path, "batch_to_NPID.tsv")) # batch id to NPID
+names(batch_to_NPID)[names(batch_to_NPID) == 'BankCaseID'] <- 'NPID'
+meta <- merge(metadata, batch_to_NPID, by = "NPID", all.x = TRUE)
+rm(metadata, batch_to_NPID)
+
+# Split 'BatchName' into 'batch' and 'sampleID'
+meta <- meta %>%
+  separate(BatchName, into = c("batch", "sampleID"), sep = "_", remove = FALSE)
+
+protein_accession <- read.delim(paste0(input_path, "protein_to_gene_accession.tsv")) # protein and gene name information
+protein_annotation <- read.delim(paste0(input_path, "Annotation_uniprotkb_Human_AND_model_organism_9606_2024_07_15.tsv"))
+
+# Raw protein counts
+counts <- read.delim(paste0(input_path, "CWOW_proteomics_batch_log2_normalized.tsv")) 
+# Extract the sample IDs from the metadata
+NPID <- meta$NPID
+# Filter the counts table to only keep columns that are in metadata
+colnames(counts) <- gsub("\\.", "-", colnames(counts))  # Replace "." with "-"
+colnames(counts) <- gsub("^X", "", colnames(counts))    # Remove "X" at the beginning
+filtered_counts <- counts[, colnames(counts) %in% NPID] # batch_ids
+rownames(filtered_counts) <- counts$ID
+
+# Extract numeric part from the batch names
+meta$batch_num <- as.numeric(gsub("[^0-9]", "", meta$batch))
+sort(unique(meta$batch_num))
+
+# Sort the batch factor levels based on the numeric part
+meta$batch_num <- factor(meta$batch_num, levels = sort(unique(meta$batch_num)))
+```
+
+# Check inputs
+```{r check_inputs}
+table(is.na(filtered_counts))
+# Replace NA values with 0 in the counts table
+filtered_counts[is.na(filtered_counts)] <- 0
+# Reorder columns of counts to match the order of 'NPID' in meta
+filtered_counts <- filtered_counts[, match(meta$NPID, colnames(filtered_counts))]
+# Remove a row by its row name (e.g., "row2")
+filtered_counts <- filtered_counts[!(rownames(filtered_counts) == "14445"), ]
+# Reorder rows of protein_accession to match rows of counts by 'Accessions'
+protein_accession_order <- protein_accession[match(rownames(filtered_counts), protein_accession$protein_accession), ]
+
+all.equal(rownames(filtered_counts), protein_accession_order$protein_accession)
+all.equal(colnames(filtered_counts), (meta$NPID))
+```
+# Batch check
+```{r batch}
+bar_batch <- ggplot(meta, aes(batch_num, after_stat(count), fill = ATS)) +
+  geom_bar() +
+  theme_bw() +
+  xlab("Batch") +
+  ggtitle("Proteomics sample count by batch") +
+    theme_bw() +
+  scale_fill_manual(values = ATSColors)
+bar_batch
+
+path <- paste0("../results_batch_normalized/metadata/batch")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 5.5)
+rm(bar_batch, counts, params, path)
+```
+
+# Create DGE object
+```{r DGE_object}
+# create object
+dge <- DGEList(counts = filtered_counts,
+               samples = meta,
+               genes = protein_accession)
+
+table(dge$samples$TYPE)
+```
+
+# Library sizes
+```{r library}
+# before filtering
+L <- mean(dge$samples$lib.size) * 1e-6
+M <- median(dge$samples$lib.size) * 1e-6
+c(L, M)
+```
+
+# Filtering 
+The filterByExpr() function in the edgeR package determines which genes have a great enough count value to keep.  
+```{r filter_counts}
+# first filter by expression
+dim(dge)
+keep.expr <-
+  filterByExpr(
+    dge,
+    group = dge$samples$ATS, # by disease groups
+    min.count = M, # min count of 1 CPM 
+  )
+dge.filtered <- dge[keep.expr, , keep.lib.sizes = FALSE]
+dim(dge.filtered)
+```
+
+# TMM
+For estimating relative RNA production levels from RNA-seq data. 
+The TMM method estimates scale factors between samples that can be incorporated 
+into currently used statistical methods for DE analysis.
+```{r TMM}
+# Now, method of trimmed mean of M-values (TMM)
+# Calculate scaling factors to convert raw library sizes into effective library sizes.
+dge.filtered.norm <- calcNormFactors(dge.filtered, method = "TMM")
+
+# norm factor summary
+summary(dge.filtered.norm$samples$norm.factors)
+normfactors <- (dge.filtered.norm$samples$norm.factors)
+meta$normfactors <- normfactors
+
+# examine normalization factors 
+plot(meta$ATS, meta$normfactors)
+path <- paste0("../results_batch_normalized/library/TMM_normfactors_ATS")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 5.5)
+rm(path, L, M, keep.expr)
+```
+
+# Density plot
+Density plots of log-intensity distribution of each library can be superposed on a single graph for a better comparison between libraries and for identification of libraries with weird distribution. 
+```{r density_plots}
+# set graphical parameter
+par(mfrow = c(1,3))
+
+# Normalize data for library size and expression intensity
+log2cpm.tech <- edgeR::cpm(dge, log = TRUE)
+log2cpm.filtered <- edgeR::cpm(dge.filtered, log = TRUE)
+log2cpm.norm <- edgeR::cpm(dge.filtered.norm, log = TRUE)
+
+# set colors
+colors <- ATSColors[dge$samples$ATS]
+nsamples <- ncol(dge)
+
+# First, plot the first column of the log2cpm.tech density
+plot(density(log2cpm.tech[,1]), col = colors[1], lwd = 2, ylim = c(0,0.5), 
+     las = 2, main = "A. Raw", xlab = expression('Log'[2]~CPM))
+# For each sample plot the lcpm density
+for (i in 1:nsamples){
+  den <- density(log2cpm.tech[,i]) #subset each column
+  lines(den$x, den$y, col = colors[i], lwd = 2) 
+}
+
+# Second, plot log2cpm.filtered
+plot(density(log2cpm.filtered[,1]), col = colors[1], lwd = 2, ylim = c(0,0.5), 
+     las = 2, main = "B. Filtered", xlab = expression('Log'[2]~CPM))
+for (i in 2:nsamples) {
+  den <- density(log2cpm.filtered[,i])
+  lines(den$x, den$y, col = colors[i], lwd = 2)
+}
+
+# Third, plot log2cpm.norm
+plot(density(log2cpm.norm[,1]), col = colors[1], lwd = 2, ylim = c(0,0.5), 
+     las = 2, main = "C. TMM", xlab = expression('Log'[2]~CPM))
+for (i in 2:nsamples) {
+  den <- density(log2cpm.norm[,i])
+  lines(den$x, den$y, col = colors[i], lwd = 2)
+}
+
+# save
+path <- ("../results_batch_normalized/library/density")
+saveToPDF(paste0(path, ".pdf"), width = 7, height = 5)
+```
+```{r cleanup1}
+rm(den, dge, dge.filtered, log2cpm.filtered, log2cpm.norm, log2cpm.tech, 
+   params, colors, i, nsamples, path, filtered_counts)
+```
+
+# MDS
+convert counts to cpm and lcpm
+set colors and get data
+```{r cpm, warning=FALSE}
+lcpm <- edgeR::cpm(dge.filtered.norm$counts, log = TRUE)
+
+# sex colors 
+dge.filtered.norm$samples$Sex <- as.factor(dge.filtered.norm$samples$Sex)
+sex_colors <- c(SexColors)[dge.filtered.norm$samples$Sex]
+
+par(bg = 'white')
+plotMDS(
+  lcpm,
+  top = 100, 
+  labels = dge.filtered.norm$samples$Sex,
+  cex = .8, 
+  dim.plot = c(1,2), 
+  plot = TRUE, 
+  col = sex_colors,
+  gene.selection = "common"
+)
+title(expression('Top 100 Genes (Log'[2]~'CPM)'))
+
+path <- paste0("../results_batch_normalized/variance/MDS_sex_dim1&2")
+saveToPDF(paste0(path, ".pdf"), width = 5.2, height = 5.2)
+
+
+# ATS colors 
+ATS_colors <- c(ATSColors)[dge.filtered.norm$samples$ATS]
+
+par(bg = 'white')
+plotMDS(
+  lcpm,
+  top = 100, 
+  labels = dge.filtered.norm$samples$ATS,
+  cex = .8, 
+  dim.plot = c(1,2), 
+  plot = TRUE, 
+  col = ATS_colors,
+  gene.selection = "common"
+)
+title(expression('Top 100 Genes (Log'[2]~'CPM)'))
+
+path <- paste0("../results_batch_normalized/variance/MDS_ATS_dim1&2")
+saveToPDF(paste0(path, ".pdf"), width = 5.2, height = 5.2)
+
+batch_colors <- rainbow(length(unique(dge.filtered.norm$samples$batch_num)))[dge.filtered.norm$samples$batch_num]
+par(bg = 'white')
+plotMDS(
+  lcpm,
+  top = 100, 
+  labels = dge.filtered.norm$samples$batch_num,
+  cex = .8, 
+  dim.plot = c(1,2), 
+  plot = TRUE, 
+  col = batch_colors,
+  gene.selection = "common"
+)
+title(expression('Top 100 Genes (Log'[2]~'CPM)'))
+
+path <- paste0("../results_batch_normalized/variance/MDS_batch_dim1&2")
+saveToPDF(paste0(path, ".pdf"), width = 5.2, height = 5.2)
+
+rm(batch_colors, sex_colors, batch_ids, path)
+```
+
+# Heatmap
+```{r}
+sample_cor <- cor(lcpm)
+
+# Add sample annotations from the meta dataframe, such as "TYPE" 
+# Assuming 'meta' contains a column "TYPE" which we want to use for grouping
+annotation <- data.frame(ATS = meta$ATS)  
+annotation$ATS <- factor(annotation$ATS)
+rownames(annotation) <- colnames(sample_cor)  # Make sure row names in annotation match sample IDs
+
+ann_colors <- list(ATS = c("CONTROL" = "#4682B0", 
+                           "LBD_ATS" = "gray35", 
+                           "LBD_AS" = "gray65", 
+                           "LBD_TS" = "gray", 
+                           "LBD_S" = "gray85"))
+
+pheatmap(sample_cor, 
+         annotation_col = annotation, 
+         annotation_colors = ann_colors,  
+         show_rownames = FALSE,  
+         show_colnames = FALSE,  
+         main = "Sample Correlation Heatmap",
+         clustering_method = "average")  
+path <- paste0("../results_batch_normalized/heatmap/lcpm_heatmap_ATS")
+saveToPDF(paste0(path, ".pdf"), width = 10, height = 6)
+rm(annotation, ann_colors)
+
+# heatmap by batch 
+# Create the annotation for batch
+annotation <- data.frame(batch_num = meta$batch_num)  
+annotation$batch_num <- factor(annotation$batch_num)
+rownames(annotation) <- colnames(sample_cor)  # Make sure row names in annotation match sample IDs
+
+# Define the colors for the batch annotations (match to the number of unique batches)
+batch_levels <- levels(annotation$batch_num)
+ann_colors <- list(batch_num = rainbow(length(batch_levels)))
+names(ann_colors$batch_num) <- batch_levels  # Assign colors to each batch level
+
+# Plot the heatmap with the corrected annotation_colors
+pheatmap(sample_cor, 
+         annotation_col = annotation, 
+         annotation_colors = ann_colors,  
+         show_rownames = FALSE,  
+         show_colnames = FALSE,  
+         main = "Sample Correlation Heatmap",
+         clustering_method = "average")
+path <- paste0("../results_batch_normalized/heatmap/lcpm_heatmap_batch")
+saveToPDF(paste0(path, ".pdf"), width = 10, height = 6)
+rm(annotation, ann_colors, sample_cor)
+```
+
+# PCA
+```{r}
+# PCA plot
+pca <- prcomp(t(lcpm), scale. = TRUE)
+explained_variance <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+# PCA plot
+pca_data <- as.data.frame(pca$x)
+pca_data$Batch <- factor(meta$batch_num, levels = unique(meta$batch_num))
+pca_data$Sex <- meta$Sex
+pca_data$Group <- meta$ATS
+
+# PCA plot visualization
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "PCA of Proteomics Data", 
+       x = paste0("PC1 (", round(explained_variance[1], 1), "%)"), 
+       y = paste0("PC2 (", round(explained_variance[2], 1), "%)")) +
+  scale_color_manual(values = ATSColors)
+
+path <- paste0("../results_batch_normalized/variance/PCA_batch")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 6)
+
+# Select the first 20 PCs and create a data frame for the scree plot
+scree_data <- data.frame(
+  PC = factor(paste0("PC", 1:20), levels = paste0("PC", 1:20)),  # Order by PC
+  Variance = explained_variance[1:20]  # Assuming explained_variance has enough values
+)
+# Create a scree plot
+ggplot(scree_data, aes(x = PC, y = Variance)) +
+  geom_bar(stat = "identity", fill = "#4682B0") +
+  theme_minimal() +
+  labs(title = "Scree Plot of PCA (First 20 PCs)",
+       x = "Principal Component",
+       y = "Percentage of Variance Explained") +
+  geom_text(aes(label = round(Variance, 2)), vjust = -0.5)  # Optional: Add text labels on top of bars
+path <- paste0("../results_batch_normalized/variance/PCA_scree")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 4.5)
+
+rm(pca, params, path, scree_data)
+```
+# Variation partitioning
+### Batch effect
+```{r variance_batch}
+# Variance explained by each covariate using variancePartition
+covariates <- meta[, c("ATS", "batch", "Sex", "Braak.NFT", "Thal.amyloid", "Cing.LB", "VaD", "TDP.43", "APOE", "Age", "Brain.wt", "NPID")]
+rownames(covariates) <- covariates$NPID
+form <- ~ (1|ATS) + (1|batch) + (1|Sex) + Braak.NFT + Thal.amyloid + Cing.LB + VaD + (1|APOE) + Age + Brain.wt
+
+# Run variancePartition analysis
+varPart <- fitExtractVarPartModel(lcpm, form, covariates)
+
+# Plot variance explained by each covariate
+plotVarPart(varPart)
+path <- paste0("../results_batch_normalized/variance/violin_varpar")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 4.5)
+
+# sort variables (i.e. columns) by median fraction # of variance explained
+vp <- sortCols(varPart)
+# Bar plot of variance fractions for the first 10 genes plotPercentBars( vp[1:10,] )
+plotPercentBars( vp[1:10,] )
+
+varPart$protein_accession <- rownames(varPart)
+# merge with gene information to get gene names for gene_id
+variance_explained <- merge(varPart, protein_accession, by = "protein_accession")
+
+# remove unnecessary columns 
+write.table(
+  variance_explained,
+  paste0(
+    "../results_batch_normalized/variance/variance_explained.tsv"
+  ),
+  sep = "\t",
+  quote = FALSE
+)
+
+rm(variance_explained, varPart, vp, form)
+```
+
+### Batch subtracted
+```{r variance_batch_corrected}
+# subtract out effect of Batch
+fit <- lmFit(lcpm, model.matrix(~ batch, covariates)) 
+res <- residuals( fit, lcpm)
+# fit model on residuals
+form <- ~ (1|ATS) + (1|Sex) + Braak.NFT + Thal.amyloid + Cing.LB + VaD + (1|APOE) + Age + Brain.wt
+
+varPartResid <- fitExtractVarPartModel( res, form, covariates )
+plotVarPart(varPartResid)
+path <- paste0("../results_batch_normalized/variance/violin_varpar_batch_subtracted")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 4.5)
+
+varPartResid$protein_accession <- rownames(varPartResid)
+# merge with gene information to get gene names for gene_id
+variance_explained <- merge(varPartResid, protein_accession, by = "protein_accession")
+
+
+# remove unnecessary columns 
+write.table(
+  variance_explained,
+  paste0(
+    "../results_batch_normalized/variance/variance_explained_batch_substracted.tsv"
+  ),
+  sep = "\t",
+  quote = FALSE
+)
+
+rm(variance_explained, varPartResid, vp, form)
+```
+
+# CCA
+Canonical Correlation Analysis (CCA) is similar to correlation between two vec- tors, except that CCA can accommodate matricies as well. For a pair of vari- ables, canCorPairs assesses the degree to which they co-vary and contain the same information. 
+```{r CCA}
+form <- ~ ATS + 
+  batch +
+  Sex +
+  Braak.NFT + 
+  Thal.amyloid +
+  Cing.LB +
+  VaD +
+  APOE + 
+  Age + 
+  Brain.wt
+
+# Compute Canonical Correlation Analysis (CCA) # between all pairs of variables
+# returns absolute correlation value
+C = canCorPairs( form, covariates)
+# Plot correlation matrix
+plotCorrMatrix( C )
+
+path <- ("../results_batch_normalized/variance/CCA")
+saveToPDF(paste0(path, ".pdf"), width = 8, height = 8)
+```
+
+# CCA with PCA
+```{r}
+# Dataframe with the first 10 PCs
+dim1_10 <- data.frame(pca_data[, 1:10])
+# Adding metadata
+dim1_10$NPID <- rownames(dim1_10)
+pcaWithMetadata <- merge(dim1_10, covariates, by = "NPID", all = TRUE)
+```
+
+```{r CCA_PCA}
+form_PCA <- ~ ATS + 
+  batch +
+  Sex +
+  Braak.NFT + 
+  Thal.amyloid +
+  Cing.LB +
+  VaD +
+  APOE + 
+  Age + 
+  Brain.wt +
+  PC1 +
+  PC2 +
+  PC3 +
+  PC4 +
+  PC5 +
+  PC6 +
+  PC7 +
+  PC8 +
+  PC9 +
+  PC10 
+
+C = canCorPairs(form_PCA, pcaWithMetadata)
+# Plot correlation matrix
+cor.mtest <- function(C, ...) {
+    C <- as.matrix(C)
+    n <- ncol(C)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+            tmp <- cor.test(C[, i], C[, j], ...)
+            p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+        }
+    }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(C)
+  p.mat
+}
+# matrix of the p-value of the correlation
+p.mat <- cor.mtest(C)
+col <- colorRampPalette(c("#4477AA", "#77AADD", "#FFFFFF", "#EE9988", "#BB4444"))
+  corrplot(C, method="color", col=col(200),  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         diag=FALSE, col.lim = c(0, 1)
+         )
+path <- paste0("../results_batch_normalized/variance/CCA_PC1_10")
+saveToPDF(paste0(path, ".pdf"), width = 12, height = 12)
+```
+
+
+# Differential analysis 
+### Design matrix
+```{r design}
+design <-
+  model.matrix(~ 0 + 
+      ATS,
+    dge.filtered.norm$samples
+  )
+
+colnames(design) <-
+  c(
+    "CONTROL",
+    "LBD_ATS",
+    "LBD_AS",
+    "LBD_TS",
+    "LBD_S"
+  )
+```
+
+# Voom
+When the library sizes are quite variable between samples, then the voom approach is theoretically more powerful than limma-trend. 
+The voom method estimates the mean-variance relationship of the log-counts.
+Generates a precision weight for each observation and enters these into the limma empirical Bayes analysis pipeline.
+```{r voom_BIC}
+form <- (
+  ~ 0 + ATS
+)
+
+counts <- as.data.frame(dge.filtered.norm$counts)
+samples <- as.data.frame(dge.filtered.norm$samples)
+voom_cov <-
+  variancePartition::voomWithDreamWeights(
+    counts = counts,
+    formula = form,
+    data = samples,
+    BPPARAM = BiocParallel::SnowParam(cores),
+    plot = TRUE
+  )
+path <-
+  paste0("../../results_batch_normalized/",
+         tool,
+         "/voom/",
+         condition,
+         ".voom.finalmodel")
+saveToPDF(paste0(path, ".pdf"), width = 6, height = 4)
+voomCounts <- voom_cov$E
+```
+
+# Contrast plot
+### pairwise TYPE 
+```{r contrasts}
+# fits linear model for each gene given a series of arrays
+fit <- lmFit(voom_cov, design)
+coef.fit <- fit$coefficients
+
+contrasts <- makeContrasts(
+  LBD_ATSvsControl = LBD_ATS - CONTROL,
+  LBD_ASvsControl = LBD_AS - CONTROL,
+  LBD_SvsControl = LBD_S - CONTROL,
+  levels = colnames(design))
+head(contrasts)
+
+# save contrast names
+allComparisons <- colnames(contrasts)
+allComparisons # check
+
+# run contrast analysis
+vfit <- contrasts.fit(fit, contrasts = contrasts)
+
+# Compute differential expression based on the empirical Bayes moderation of the
+# standard errors towards a common value.
+# The logCPM values can then be used in any standard limma pipeline, using the trend=TRUE
+# argument when running eBayes or treat. For example:
+veBayesFit <- eBayes(vfit, trend = TRUE, robust=TRUE)
+plotSA(veBayesFit, main = "Final Model: Mean-variance Trend")
+path <-
+  paste0("../../results_batch_normalized/",
+         tool,
+         "/voom/",
+         condition,
+         ".voom.eBayes.finalmodel")
+saveToPDF(paste0(path, ".pdf"), width = 9, height = 5)
+```
+
+# DEGs summary
+```{r DGE_summary}
+pval <- 0.05
+lfc.cutoff <- 0.25
+
+sumTable <- 
+  summary(decideTests(
+    veBayesFit,  # object
+    adjust.method = "BH", # by default the method = "separate"
+    p.value = pval,
+    lfc = lfc.cutoff  # numeric, minimum absolute log2-fold change required
+  ))
+
+print(paste0(" FDRq < ", pval,
+             " & absolute log2-fold change > ", lfc.cutoff))
+sumTable
+write.table(sumTable, 
+            paste0("../../results_batch_normalized/", tool, "/DEGs/", condition, ".DEGs.summary.txt"), 
+            quote = FALSE, sep = "\t")
+```
+# Add gene information to DEGs
+reformat genes table to only include relevant information
+```{r}
+genes_relevant <- dplyr::select(protein_accession, 1:4,10:12)
+```
+
+Check 
+```{r DGE_check, eval=FALSE}
+test <- topTable(
+  veBayesFit, 
+  coef = "LBD_SvsControl",  
+  n = Inf, 
+  p.value = 1,
+  lfc = 0, 
+  sort.by = "P", 
+  genelist = protein_accession, 
+  confint = TRUE # column of confidence interval 
+    )
+#head(test, 20)
+#subset(test, gene_name == "SNCB") 
+```
+# cool map
+```{r}
+LBDvsControl <- topTable(veBayesFit, coef = 'LBD_SvsControl', p.value = 0.05, adjust.method = 'fdr',
+                  number = Inf, genelist = protein_accession)
+LBDvsControl$gene_name
+up <- LBDvsControl$gene_id[LBDvsControl$logFC > .25][1:15]
+down <- LBDvsControl$gene_id[LBDvsControl$logFC < -.25][1:15]
+select <- c(up, down)
+coolmap(voom_cov[select,])
+```
+# Save objects
+```{r save_voom}
+saveRDS(veBayesFit, file = paste0("../../rObjects/", condition, ".veBayesFit.rds"))
+saveRDS(voomCounts, file = paste0("../../rObjects/", condition, ".voomCountsMatrix.rds"))
+```
+
+# Output DEG tables
+```{r DGE_output}
+coef <- 1
+
+for (i in allComparisons) {
+  vTopTableAll <- topTable(
+    veBayesFit, 
+    coef = coef,  
+    n = Inf, 
+    p.value = 1,
+    lfc = 0, 
+    sort.by = "P", 
+    genelist = genes_relevant, 
+    confint = TRUE # column of confidence interval 
+    )
+    saveRDS(vTopTableAll, file = 
+            paste0("../../rObjects/gene_tables/", condition, "_", 
+                   i,"_gene_table.rds"))
+  path <- paste0("../../results_batch_normalized/", tool, "/DEGs/", condition, "_", 
+  i, "_gene_DEGs_FDRq1.00.txt", sep = "") 
+  write.table(
+    vTopTableAll,
+    path,
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE
+  )
+  # p < 0.05, log2fc > 0
+  vTopTable1 <-
+    topTable( 
+      veBayesFit,  
+      coef = coef,  
+      n = Inf, 
+      p.value = pval,
+      lfc = lfc.cutoff,
+      genelist = genes_relevant, 
+      confint = TRUE # column of confidence interval 
+    )
+  path <- paste0("../../results_batch_normalized/", tool, "/DEGs/", condition, "_", 
+  i, "_gene_DEGs_FDRq0.05_logFC_0.25.txt", sep = "") 
+  write.table(
+    vTopTable1,
+    path,
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE
+  )
+  # increment 
+  coef <- coef + 1
+}
+remove(coef)
+```
