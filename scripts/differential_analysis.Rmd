@@ -1,0 +1,405 @@
+---
+title: "Proteomics Differential Analysis"
+author: "Kimberly Olney, Ph.D."
+date: "10/24/2024"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+params:
+  args: myarg
+---
+
+LBD CWOW Proteomics data for LBD and control cases. Obtained from Synapse.org syn24995077.txt
+
+# Setup
+```{r setup}
+knitr::opts_knit$set(root.dir = ".")
+```
+
+# User defined variables
+```{r set_variables}
+input_path <- ("/research/labs/neurology/fryer/projects/LBD_CWOW/proteomics/counts/")
+SexColors <- c("purple", "orange")
+library(edgeR)
+library(tidyr)
+library(limma)
+library(variancePartition)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(pheatmap)
+```
+
+# Read in proteomics data, metadata, and protein to gene association
+```{r inputs}
+metadata <- read.delim(paste0(input_path, "CWOW_metadata_430.tsv")) # metadata
+# Replace NA values with 0 in the counts table
+metadata$Cing.LB[is.na(metadata$Cing.LB)] <- 0
+
+batch_to_NPID <- read.delim(paste0(input_path, "batch_to_NPID.tsv")) # batch id to NPID
+names(batch_to_NPID)[names(batch_to_NPID) == 'BankCaseID'] <- 'NPID'
+meta <- merge(metadata, batch_to_NPID, by = "NPID", all.x = TRUE)
+rm(metadata, batch_to_NPID)
+
+# Split 'BatchName' into 'batch' and 'sampleID'
+meta <- meta %>%
+  separate(BatchName, into = c("batch", "sampleID"), sep = "_", remove = FALSE)
+
+protein_accession <- read.delim(paste0(input_path, "protein_to_gene_accession.tsv")) # protein and gene name information
+protein_annotation <- read.delim(paste0(input_path, "Annotation_uniprotkb_Human_AND_model_organism_9606_2024_07_15.tsv"))
+
+# Raw protein counts
+counts <- read.delim(paste0(input_path, "CWOW_proteomics_counts_raw.tsv"))
+# Extract the sample IDs from the metadata
+batch_ids <- meta$BatchName
+# Filter the counts table to only keep columns that are in batch_ids
+filtered_counts <- counts[, colnames(counts) %in% batch_ids]
+rownames(filtered_counts) <- counts$Accessions
+```
+
+# Check inputs
+```{r check_inputs}
+# Replace NA values with 0 in the counts table
+filtered_counts[is.na(filtered_counts)] <- 0
+# Reorder columns of counts to match the order of 'BatchName' in meta
+filtered_counts <- filtered_counts[, match(meta$BatchName, colnames(filtered_counts))]
+# Reorder rows of protein_accession to match rows of counts by 'Accessions'
+protein_accession <- protein_accession[match(rownames(filtered_counts), protein_accession$protein_accession), ]
+
+
+all.equal(rownames(filtered_counts), protein_accession$protein_accession)
+all.equal(colnames(filtered_counts), (meta$BatchName))
+```
+
+# Create DGE object
+```{r DGE_object}
+# create object
+dge <- DGEList(counts = filtered_counts,
+               samples = meta,
+               genes = protein_accession)
+
+table(dge$samples$TYPE)
+```
+
+```{r}
+# Step 1: Filter lowly abundant proteins (e.g., proteins expressed in at least half of the samples)
+# Filter proteins that have at least 1 CPM in at least half the samples
+dim(dge)
+logCPM_all_proteins <- cpm(dge, log=TRUE, prior.count=2)
+keep <- rowSums(cpm(dge) > 2) >= (32)
+dge.filtered <- dge[keep, , keep.lib.sizes=FALSE]
+dim(dge.filtered)
+
+# Step 2: Normalize counts using TMM normalization
+dge.filtered <- calcNormFactors(dge.filtered)
+
+# Step 3: QC Visualization - Density plot before and after normalization
+# Before normalization
+logCPM_before <- cpm(dge.filtered, log=TRUE, prior.count=2)
+
+# After normalization
+logCPM_after <- cpm(dge.filtered, log=TRUE, normalized.lib.sizes=TRUE, prior.count=2)
+
+# Plot density before and after normalization
+par(mfrow=c(1, 3))
+plot(density(logCPM_all_proteins), main="Density Before Normalization", xlab="Log-CPM")
+plot(density(logCPM_before), main="Density Before Normalization", xlab="Log-CPM")
+plot(density(logCPM_after), main="Density After Normalization", xlab="Log-CPM")
+```
+
+```{r}
+# Step 4: QC Visualization - MDS Plot (Multidimensional Scaling Plot)
+#plotMDS(dge, col=as.numeric(meta$TYPE), main="MDS Plot: Proteomics Data")
+
+# Step 5: QC Visualization - Sample correlation heatmap
+sample_cor <- cor(logCPM_after)
+#heatmap(sample_cor, symm=TRUE, main="Sample Correlation Heatmap")
+
+# Add sample annotations from the meta dataframe, such as "TYPE" 
+# Assuming 'meta' contains a column "TYPE" which we want to use for grouping
+annotation <- data.frame(TYPE = meta$TYPE)  
+annotation$TYPE <- factor(annotation$TYPE)
+rownames(annotation) <- colnames(sample_cor)  # Make sure row names in annotation match sample IDs
+
+# Choose colors for annotation (you can customize these)
+ann_colors <- list(TYPE = c("CONTROL" = "blue", "LBD" = "gray"))  # Adjust the groups and colors as necessary
+
+# Plot the heatmap with sample annotation
+pheatmap(sample_cor, 
+         annotation_col = annotation,  # Use the annotation for columns
+         annotation_colors = ann_colors,  # Define colors for the annotation
+         show_rownames = FALSE,  # You can choose whether to show sample IDs on the rows
+         show_colnames = FALSE,  # Hide column names for better clarity
+         main = "Sample Correlation Heatmap",
+         clustering_method = "average")  # You can change clustering method if needed
+```
+
+
+```{r}
+# PCA plot
+pca <- prcomp(t(logCPM_after), scale. = TRUE)
+explained_variance <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+# PCA plot
+pca_data <- as.data.frame(pca$x)
+pca_data$Batch <- meta$batch
+pca_data$Sex <- meta$Sex
+pca_data$Group <- meta$TYPE
+
+# PCA plot visualization
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Batch)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "PCA of Proteomics Data", 
+       x = paste0("PC1 (", round(explained_variance[1], 1), "%)"), 
+       y = paste0("PC2 (", round(explained_variance[2], 1), "%)"))
+```
+
+```{r variance}
+# Variance explained by each covariate using variancePartition
+covariates <- meta[, c("TYPE", "batch", "Sex", "Braak.NFT", "Thal.amyloid", "Cing.LB", "VaD", "TDP.43", "APOE", "Age", "Brain.wt", "BatchName")]
+rownames(covariates) <- covariates$BatchName
+form <- ~ TYPE + batch + Sex + Braak.NFT + Thal.amyloid + Cing.LB + VaD + APOE + Age + Brain.wt
+
+# Run variancePartition analysis
+varPart <- fitExtractVarPartModel(logCPM_after, form, covariates)
+
+# Plot variance explained by each covariate
+plotVarPart(varPart)
+```
+
+```{r differential}
+# Step 7: Differential Expression Analysis - LBD vs Control
+design <- model.matrix(~ TYPE + batch, data = meta)
+
+ugh <- c(colnames(design))
+print(ugh)
+colnames(design) <-
+  c(
+    CONTROL,
+    LBD,
+    "Batch1",
+    "Batch2",
+    "Batch3",
+    "Batch4",
+    "Batch5",
+    "Batch6",
+    "Batch7",
+  )
+
+form <- (
+  ~ 0 +
+      TYPE + 
+      batch
+)
+counts <- dge.filtered$counts
+samples <- dge.filtered$samples
+
+dge.filtered$samples$TYPE <- factor(dge.filtered$samples$TYPE)
+dge.filtered$samples$batch <- factor(dge.filtered$samples$batch)
+
+voom_cov <-
+  variancePartition::voomWithDreamWeights(
+    counts = dge.filtered,
+    formula = form,
+    data = dge.filtered,
+    BPPARAM = BiocParallel::SnowParam(cores),
+    plot = TRUE
+  )
+# Estimate dispersions
+dge <- estimateDisp(dge.filtered, design)
+
+# Fit the model
+fit <- glmQLFit(dge, design)
+
+# Perform differential expression (LBD vs Control)
+qlf <- glmQLFTest(fit, coef = 2)  # 'coef=2' compares LBD to Control
+
+# Top differentially expressed proteins
+top_genes <- topTags(qlf, n = Inf)
+
+# Results table
+res <- as.data.frame(top_genes$table)
+
+# Step 8: Volcano Plot of Differential Expression Results
+volcano_data <- res %>%
+  mutate(logFC = logFC, 
+         pvalue = PValue, 
+         FDR = p.adjust(pvalue, method = "fdr"))  # Add FDR (adjusted p-value)
+
+# Volcano plot
+volc <- ggplot(volcano_data, aes(x = logFC, y = -log10(FDR))) +
+  geom_point(aes(color = FDR < 0.05), alpha = 0.8) + 
+  scale_color_manual(values = c("grey", "red")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  theme_minimal() 
+library(plotly)
+library(ggplo)
+ggplotly(volc)
+
+up <- subset(volcano_data, logFC > 0.25 & FDR < 0.05)
+write.table(up, "LBD_vs_Control_upregulated.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+getwd()
+
+for (i in allComparisons) {
+  group1_vs_group2 <-
+    read.delim(
+      paste0(
+        "../../results/",
+        tool,
+        "/DEGs/",
+        condition,
+        "_",
+        i,
+        "_gene_DEGs_FDRq1.00.txt"
+      )
+    )
+  color_values <- vector()
+  max <- nrow(group1_vs_group2)
+  for (row in 1:max) {
+    if (group1_vs_group2$adj.P.Val[row] < 0.05) {
+      if (group1_vs_group2$logFC [row] > 0.25) {
+        color_values <- c(color_values, 1)
+      }
+      else if (group1_vs_group2$logFC[row] < -.25) {
+        color_values <- c(color_values, 2)
+      }
+      else {
+        color_values <- c(color_values, 3)
+      }
+    }
+    else{
+      color_values <- c(color_values, 3)
+    }
+  }
+  group1_vs_group2$color_adjpval_0.05 <- factor(color_values)
+  data <- group1_vs_group2
+  # plot only if there are DEGs with p_val_adj < 0.05
+  num <- subset(data, (adj.P.Val < 0.05 & logFC < -.25)  | (adj.P.Val < 0.05 & logFC > .25 ))
+  num <- nrow(num)
+  if (num != 0) {
+    up <- data[data$color_adjpval_0.05 == 1,]
+    up10 <- up[1:10,]
+    upFold <- subset(up, logFC > 1)
+    upFold <- upFold[!(upFold$gene_name %in% up10$gene_name),]
+    down <- data[data$color_adjpval_0.05 == 2,]
+    down10 <- down[1:10,]
+    downFold <- subset(down, logFC < -1)
+    downFold <- downFold[!(downFold$gene_name %in% down10$gene_name),]
+    if (!1 %in% unique(data$color_adjpval_0.05)) {
+      my_colors <- c("blue", "gray")
+    } else if (!2 %in% unique(data$color_adjpval_0.05)) {
+      my_colors <- c("red", "gray")
+    } else if (!1 %in% unique(data$color_adjpval_0.05) &&
+               !2 %in% unique(data$color_adjpval_0.05)) {
+      my_colors <- c("gray")
+    } else {
+      my_colors <- c("red", "blue", "gray")
+    }
+    hadjpval <- (-log10(max(data$P.Value[data$adj.P.Val < 0.05],
+                            na.rm = TRUE)))
+    negFC <- c(-.25)
+    posFC <- c(.25) 
+    i <- gsub("vs", " vs ", i)
+    p <-
+      ggplot(data = data,
+             aes(
+               x = logFC,
+               y = -log10(P.Value),
+               color = color_adjpval_0.05
+             )) +
+      geom_point(alpha = 0.8, size = 1) +
+      theme_bw() +
+      theme(legend.position = "none") +
+      scale_color_manual(values = my_colors) +
+      labs(
+        title = "",
+        x = expression(log[2](FC)),
+        y = expression(-log[10] ~ "(" ~ italic("p") ~ "-value)")
+      )  +
+      geom_hline(yintercept = hadjpval,
+                 #  horizontal line
+                 colour = "#000000",
+                 linetype = "dashed") +
+      geom_vline(xintercept = negFC,
+                 #  horizontal line
+                 colour = "#000000",
+                 linetype = "dashed") +
+      geom_vline(xintercept = posFC,
+                 #  horizontal line
+                 colour = "#000000",
+                 linetype = "dashed") +
+      ggtitle(paste0(i)) +
+      geom_text_repel(
+        data = up10,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "maroon",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 10)
+      ) +
+      geom_text_repel(
+        data = upFold,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "maroon",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 10)
+      ) +
+      geom_text_repel(
+        data = down10,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "navyblue",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 10)
+      ) +
+      geom_text_repel(
+        data = downFold,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "navyblue",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 10)
+      )
+    p
+    i <- gsub(" vs ", "vs", i)
+    # save
+    path <-
+      paste0(
+        "../../results/",
+        tool,
+        "/volcano/",
+        condition,
+        "_",
+        i,
+        "_gene_volcano_FDRq0.05"
+      )
+    pdf(paste0(path, ".pdf"),
+        height = 5,
+        width = 5)
+    print(p)
+    dev.off()
+    
+    print(paste("i =", i))
+  }
+} 
+```
+

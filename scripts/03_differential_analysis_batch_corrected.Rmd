@@ -1,0 +1,528 @@
+---
+title: "Proteomics Differential Analysis"
+author: "Kimberly Olney, Ph.D."
+date: "10/24/2024"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+params:
+  args: myarg
+---
+
+LBD CWOW Proteomics data for LBD and control cases. Obtained from Synapse.org syn24995077.txt
+
+# Setup
+```{r setup}
+knitr::opts_knit$set(root.dir = ".")
+```
+
+# User defined variables
+sourcing file_paths_and_colours will load the libraries and user defined variables for colors of the graphs 
+```{r set_variables, message=FALSE, warning=FALSE, tidy=TRUE}
+source(here::here("scripts", "file_paths_and_colours.R"))
+```
+
+# Read in proteomics data and protein to gene association
+```{r inputs}
+batch_to_NPID <- read.delim(paste0(input_path, "batch_to_NPID.tsv")) # batch id to NPID
+names(batch_to_NPID)[names(batch_to_NPID) == 'BankCaseID'] <- 'NPID'
+meta <- merge(metadata, batch_to_NPID, by = "NPID", all.x = TRUE)
+rm(metadata, batch_to_NPID)
+
+# Split 'BatchName' into 'batch' and 'sampleID'
+meta <- meta %>%
+  separate(BatchName, into = c("batch", "sampleID"), sep = "_", remove = FALSE)
+
+protein_accession <- read.delim(paste0(input_path, "protein_to_gene_accession.tsv")) # protein and gene name information
+protein_annotation <- read.delim(paste0(input_path, "Annotation_uniprotkb_Human_AND_model_organism_9606_2024_07_15.tsv"))
+
+# Raw protein counts
+counts <- read.delim(paste0(input_path, "CWOW_proteomics_batch_log2_normalized.tsv")) 
+# Extract the sample IDs from the metadata
+NPID <- meta$NPID
+# Filter the counts table to only keep columns that are in metadata
+colnames(counts) <- gsub("\\.", "-", colnames(counts))  # Replace "." with "-"
+colnames(counts) <- gsub("^X", "", colnames(counts))    # Remove "X" at the beginning
+filtered_counts <- counts[, colnames(counts) %in% NPID] # batch_ids
+rownames(filtered_counts) <- counts$ID
+
+# Extract numeric part from the batch names
+meta$batch_num <- as.numeric(gsub("[^0-9]", "", meta$batch))
+sort(unique(meta$batch_num))
+
+# Sort the batch factor levels based on the numeric part
+meta$batch_num <- factor(meta$batch_num, levels = sort(unique(meta$batch_num)))
+```
+
+# Read in  rObjects
+```{r save_dge}
+dge.filtered.norm <- readRDS("../rObjects/dge.filtered.norm.rds")
+dge <- readRDS("../rObjects/dge.rds")
+```
+
+# Differential analysis 
+### Design matrix
+```{r design}
+design <-
+  model.matrix(~ 0 + 
+      ATS + 
+    #  Age + 
+      Sex + 
+     # Thal.amyloid + 
+     # Braak.NFT +
+     # Cing.LB +
+      batch,
+    dge$samples
+  )
+
+colnames(design) <-
+  c(
+    "CONTROL",
+    "LBD_ATS",
+    "LBD_AS",
+    "LBD_TS",
+    "LBD_S", 
+  #  "Age",
+    "Sex", 
+   # "Thal.amyloid",
+   # "Braak.NFT", 
+   # "Cing.LB",
+    "batchbatch10",
+    "batchbatch11",
+    "batchbatch12",
+    "batchbatch13",
+    "batchbatch14",
+    "batchbatch15",
+    "batchbatch16",
+    "batchbatch17",
+    "batchbatch18",
+    "batchbatch19",
+    "batchbatch2",
+    "batchbatch20",
+    "batchbatch21",
+    "batchbatch22",
+    "batchbatch23",
+    "batchbatch24",
+    "batchbatch25",
+    "batchbatch26",
+    "batchbatch27",
+    "batchbatch28",
+    "batchbatch29",
+    "batchbatch30",
+    "batchbatch4",
+    "batchbatch5",
+    "batchbatch6",
+    "batchbatch7",
+    "batchbatch8" 
+  )
+```
+
+### Voom
+When the library sizes are quite variable between samples, then the voom approach is theoretically more powerful than limma-trend. 
+The voom method estimates the mean-variance relationship of the log-counts.
+Generates a precision weight for each observation and enters these into the limma empirical Bayes analysis pipeline.
+```{r voom_BIC}
+form <- (
+  ~ 0 + 
+    ATS + 
+   # Age + 
+    Sex + 
+   # Thal.amyloid + 
+   # Braak.NFT  + 
+   # Cing.LB + 
+    batch
+)
+
+counts <- as.data.frame(dge$counts)
+log2_counts <- log2(counts)
+samples <- as.data.frame(dge$samples)
+#voom_cov <-
+#  variancePartition::voomWithDreamWeights(
+#    counts = counts,
+#    formula = form,
+#    data = samples,
+#    BPPARAM = BiocParallel::SnowParam(cores),
+#    plot = TRUE
+#  )
+#path <-
+#  paste0("../results_batch_normalized/variance/voom_trend")
+#saveToPDF(paste0(path, ".pdf"), width = 6, height = 4)
+#voomCounts <- voom_cov$E
+```
+
+### Contrast plot
+```{r contrasts}
+# fits linear model for each gene given a series of arrays
+fit <- lmFit(log2_counts, design)
+coef.fit <- fit$coefficients
+
+contrasts <- makeContrasts(
+  LBD_ATS_vs_Control = LBD_ATS - CONTROL,
+  LBD_AS_vs_Control = LBD_AS - CONTROL,
+  LBD_S_vs_Control = LBD_S - CONTROL,
+  LBD_ATS_vs_LBD_S = LBD_ATS - LBD_S,
+  LBD_ATS_vs_LBD_AS = LBD_ATS - LBD_AS,
+  LBD_AS_vs_LBD_S = LBD_AS - LBD_S,
+  levels = colnames(design))
+head(contrasts)
+
+# save contrast names
+allComparisons <- colnames(contrasts)
+allComparisons # check
+
+# run contrast analysis
+vfit <- contrasts.fit(fit, contrasts = contrasts)
+
+# Compute differential expression based on the empirical Bayes moderation of the
+# standard errors towards a common value.
+# The logCPM values can then be used in any standard limma pipeline, using the trend=TRUE
+# argument when running eBayes or treat. For example:
+veBayesFit <- eBayes(vfit, trend = TRUE, robust=TRUE)
+plotSA(veBayesFit, main = "Final Model: Mean-variance Trend")
+path <-
+  paste0("../results_batch_normalized/variance/voom_eBayes")
+saveToPDF(paste0(path, ".pdf"), width = 9, height = 5)
+```
+
+### DEGs summary
+```{r DGE_summary}
+pval <- 0.05
+lfc.cutoff <- 0.25
+
+sumTable <- 
+  summary(decideTests(
+    veBayesFit,  # object
+    adjust.method = "BH", # by default the method = "separate"
+    p.value = pval,
+    lfc = lfc.cutoff  # numeric, minimum absolute log2-fold change required
+  ))
+
+print(paste0(" q-value < ", pval,
+             " & absolute log2-fold change > ", lfc.cutoff))
+sumTable
+write.table(sumTable, 
+            paste0("../results_batch_normalized/differential/DEGs_summary.txt"),
+            quote = FALSE, sep = "\t")
+```
+
+### Check 
+```{r DGE_check, eval=FALSE}
+test2 <- topTable(
+  veBayesFit, 
+  coef = "LBD_AS_vs_LBD_S",  
+  n = Inf, 
+  p.value = 1,
+  lfc = 0, 
+  sort.by = "P", 
+#  genelist = protein_accession, 
+  confint = TRUE # column of confidence interval 
+    )
+test2$protein_accession <- rownames(test2)
+df <- merge(test2, protein_accession, by = "protein_accession")
+```
+
+### Save objects
+```{r save_voom}
+saveRDS(veBayesFit, file = paste0("../rObjects/veBayesFit.rds"))
+#saveRDS(voomCounts, file = paste0("../rObjects/voomCountsMatrix.rds"))
+```
+
+### Output DEG tables
+```{r DGE_output}
+coef <- 1
+
+for (i in allComparisons) {
+  vTopTableAll <- topTable(
+    veBayesFit, 
+    coef = coef,  
+    n = Inf, 
+    p.value = 1,
+    lfc = 0, 
+    sort.by = "P", 
+    confint = TRUE 
+    )
+  vTopTableAll$protein_accession <- rownames(vTopTableAll)
+  df <- merge(vTopTableAll, protein_accession, by = "protein_accession")
+  saveRDS(df, file = paste0("../rObjects/", 
+                   i,"_gene_table.rds"))
+  
+  path <- paste0("../results_batch_normalized/differential/", 
+  i, "_gene_DEGs_q1.00.txt", sep = "") 
+  write.table(
+    df,
+    path,
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE
+  )
+  
+  vTopTable1 <- subset(df, (adj.P.Val < 0.05 & logFC > 0.25) | (adj.P.Val < 0.05 & logFC < -0.25))
+  path <- paste0("../results_batch_normalized/differential/", 
+  i, "_gene_DEGs_q0.05_logFC0.25.txt", sep = "") 
+  write.table(
+    vTopTable1,
+    path,
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE
+  )
+  coef <- coef + 1  # increment 
+}
+remove(coef, df, vTopTable1, vTopTableAll)
+```
+
+# Volcano plots
+```{r volcano, warning=FALSE}
+q_value_cutoff = 0.05
+logFC_cutoff = 0.25
+for (i in allComparisons) {
+  group1_vs_group2 <-
+    read.delim(
+      paste0("../results_batch_normalized/differential/",
+        i,
+        "_gene_DEGs_q1.00.txt"
+      )
+    )
+  color_values <- vector()
+  max <- nrow(group1_vs_group2)
+  for (row in 1:max) {
+    if (group1_vs_group2$adj.P.Val[row] < 0.05) {
+      if (group1_vs_group2$logFC [row] > 0.25) {
+        color_values <- c(color_values, 1)
+      }
+      else if (group1_vs_group2$logFC[row] < -0.25) {
+        color_values <- c(color_values, 2)
+      }
+      else {
+        color_values <- c(color_values, 3)
+      }
+    }
+    else{
+      color_values <- c(color_values, 3)
+    }
+  }
+  group1_vs_group2$color_adjpval_0.05 <- factor(color_values)
+  data <- group1_vs_group2
+  # plot only if there are DEGs with p_val_adj < 0.05
+  num <- subset(data, (adj.P.Val < 0.05 & logFC < -0.25)  | (adj.P.Val < 0.05 & logFC > 0.25 ))
+  num <- nrow(num)
+  if (num != 0) {
+    up <- data[data$color_adjpval_0.05 == 1,]
+    up10 <- up[1:10,]
+    upFold <- subset(up, logFC > 0)
+    upFold <- upFold[!(upFold$gene_name %in% up10$gene_name),]
+    down <- data[data$color_adjpval_0.05 == 2,]
+    down10 <- down[1:10,]
+    downFold <- subset(down, logFC < -0)
+    downFold <- downFold[!(downFold$gene_name %in% down10$gene_name),]
+    if (!1 %in% unique(data$color_adjpval_0.05)) {
+      my_colors <- c("blue", "gray")
+    } else if (!2 %in% unique(data$color_adjpval_0.05)) {
+      my_colors <- c("red", "gray")
+    } else if (!1 %in% unique(data$color_adjpval_0.05) &&
+               !2 %in% unique(data$color_adjpval_0.05)) {
+      my_colors <- c("gray")
+    } else {
+      my_colors <- c("red", "blue", "gray")
+    }
+    hadjpval <- (-log10(max(data$P.Value[data$adj.P.Val < 0.05],
+                            na.rm = TRUE)))
+    negFC <- c(-0.25)
+    posFC <- c(0.25) 
+    
+    title_main <- gsub("_vs_", " versus ", gsub("_", " ", i)) # format group name with parentheses
+    title_sub <- paste("q-value <", q_value_cutoff, "& |log2FC| >", logFC_cutoff)
+    
+    i <- gsub("vs", " versus ", i)
+    p <-
+      ggplot(data = data,
+             aes(
+               x = logFC,
+               y = -log10(P.Value),
+               color = color_adjpval_0.05
+             )) +
+      geom_point(alpha = 0.8, size = 1) +
+      theme_bw() +
+      theme(legend.position = "none") +
+      scale_color_manual(values = my_colors) +
+      labs(
+        title = title_main,
+        subtitle = title_sub,
+        x = expression(log[2](FC)),
+        y = expression(-log[10] ~ "(" ~ italic("p") ~ "-value)")
+      )  +
+      geom_hline(yintercept = hadjpval,
+                 #  horizontal line
+                 colour = "#000000",
+                 linetype = "dashed") +
+      geom_vline(xintercept = negFC,
+                 #  horizontal line
+                 colour = "#000000",
+                 linetype = "dashed") +
+      geom_vline(xintercept = posFC,
+                 #  horizontal line
+                 colour = "#000000",
+                 linetype = "dashed") +
+      geom_text_repel(
+        data = up10,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "maroon",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 5)
+      ) +
+      geom_text_repel(
+        data = upFold,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "maroon",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 5)
+      ) +
+      geom_text_repel(
+        data = down10,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "navyblue",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 5)
+      ) +
+      geom_text_repel(
+        data = downFold,
+        aes(
+          x = logFC,
+          y = -log10(P.Value),
+          label = gene_name
+        ),
+        color = "navyblue",
+        fontface = "italic",
+        size = 3,
+        max.overlaps = getOption("ggrepel.max.overlaps", default = 5)
+      )
+    p
+    i <- gsub(" versus ", "vs", i)
+    # save
+    path <-
+      paste0(
+        "../results_batch_normalized/volcano/",
+        i,
+        "_volcano_q0.05_logFC0.25"
+      )
+    pdf(paste0(path, ".pdf"),
+        height = 5,
+        width = 5)
+    print(p)
+    dev.off()
+    
+    print(paste("i =", i))
+  }
+} 
+```
+
+```{r cleanup}
+# clean up
+remove(up, up10, upFold, group1_vs_group2, downFold, down10, data, p)
+```
+
+# Make excel table
+```{r excel}
+# first read in the files
+for (i in allComparisons) {
+  filepath <- paste0("../results_batch_normalized/differential/", 
+  i, "_gene_DEGs_q1.00.txt", sep = "") 
+  assign(paste0(i),
+         read.delim(
+           filepath,
+           header = TRUE,
+           sep = "\t",
+           stringsAsFactors = FALSE
+         ))
+}
+allComparisons
+list_of_datasets <- list(
+"LBD_ATS_vs_Control" = LBD_ATS_vs_Control,
+"LBD_AS_vs_Control" = LBD_AS_vs_Control,     
+"LBD_S_vs_Control" = LBD_S_vs_Control,
+"LBD_ATS_vs_LBD_S" = LBD_ATS_vs_LBD_S,         
+"LBD_ATS_vs_LBD_AS" = LBD_ATS_vs_LBD_AS,
+"LBD_AS_vs_LBD_S "= LBD_AS_vs_LBD_S)
+
+write.xlsx(list_of_datasets, file = paste0(
+    "../results_batch_normalized/differential/DEGs_q1.00.xlsx"))
+```
+clean up
+```{r cleanup_excel}
+remove(
+LBD_ATS_vs_Control,
+LBD_AS_vs_Control,     
+LBD_S_vs_Control,
+LBD_ATS_vs_LBD_S,         
+LBD_ATS_vs_LBD_AS,
+LBD_AS_vs_LBD_S
+)
+```
+
+# Excel table of significant DEGs
+```{r}
+# first read in the files
+for (i in allComparisons) {
+  filepath <- paste0("../results_batch_normalized/differential/", 
+  i, "_gene_DEGs_q0.05_logFC0.25.txt", sep = ""
+  )
+  assign(paste0(i),
+         tryCatch(
+         read.delim(
+           filepath,
+           header = TRUE,
+           sep = "\t",
+           stringsAsFactors = FALSE
+         ), error=function(e) NULL))
+}
+
+list_of_datasets <- list(
+"LBD_ATS_vs_Control" = LBD_ATS_vs_Control,
+"LBD_AS_vs_Control" = LBD_AS_vs_Control,     
+"LBD_S_vs_Control" = LBD_S_vs_Control,
+"LBD_ATS_vs_LBD_S" = LBD_ATS_vs_LBD_S,         
+"LBD_ATS_vs_LBD_AS" = LBD_ATS_vs_LBD_AS,
+"LBD_AS_vs_LBD_S "= LBD_AS_vs_LBD_S)
+write.xlsx(list_of_datasets, file = paste0("../results_batch_normalized/differential/DEGs_q0.05_logFC0.25.xlsx"))
+```
+
+```{r}
+# Create empty lists to store up-regulated and down-regulated genes dataframes
+up_regulated_genes <- list()
+down_regulated_genes <- list()
+
+# Iterate over each dataframe in list_of_datasets
+for (comparison_name in names(list_of_datasets)) {
+    # Filter for up-regulated genes (logFC > 0)
+    up_regulated_genes[[comparison_name]] <- list_of_datasets[[comparison_name]][list_of_datasets[[comparison_name]]$logFC > 0, ]
+    
+    # Filter for down-regulated genes (logFC < 0)
+    down_regulated_genes[[comparison_name]] <- list_of_datasets[[comparison_name]][list_of_datasets[[comparison_name]]$logFC < 0, ]
+}
+
+# Write up-regulated genes to an Excel file
+up_regulated_file <- paste0("../results_batch_normalized/differential/upregulated_proteins.xlsx")
+write.xlsx(up_regulated_genes, file = up_regulated_file)
+
+# Write down-regulated genes to an Excel file
+down_regulated_file <- paste0("../results_batch_normalized/differential/downregulated_proteins.xlsx")
+write.xlsx(down_regulated_genes, file = down_regulated_file)
+```
+
+
